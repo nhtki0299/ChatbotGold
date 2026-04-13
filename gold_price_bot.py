@@ -33,9 +33,13 @@
 """
 
 import logging
+import os
 import re
+import threading
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
 
 import requests
@@ -100,6 +104,14 @@ HTTP_HEADERS = {
 
 # Timeout cho HTTP requests (giây)
 HTTP_TIMEOUT = 15
+
+# Port cho web server (Render.com truyền qua biến môi trường PORT)
+PORT = int(os.environ.get("PORT", 10000))
+
+# URL của service trên Render (dùng để self-ping giữ bot sống)
+# Render tự cung cấp biến RENDER_EXTERNAL_HOSTNAME
+# Hoặc bạn có thể set thủ công, VD: "https://ten-service.onrender.com"
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 # Mapping tên hiển thị đẹp hơn cho data-seach values
 GOLD_NAME_MAP = {
@@ -880,16 +892,111 @@ async def post_init(application: Application) -> None:
             logger.error(f"Lỗi gửi thông báo khởi động: {e}")
 
 
+# =============================================================================
+# KEEP-ALIVE WEB SERVER CHO RENDER.COM
+# =============================================================================
+#
+# Render.com free tier yêu cầu:
+#   1. Service phải bind vào PORT (biến môi trường từ Render)
+#   2. Service bị tắt sau 15 phút không có HTTP request
+#
+# Giải pháp:
+#   - Chạy một HTTP server nhỏ trên PORT để Render nhận diện service đang sống
+#   - Tạo background thread tự ping chính mình mỗi 5 phút để tránh bị tắt
+#
+
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    """
+    HTTP handler đơn giản trả về status 200.
+    Render.com sẽ gửi health check đến đây.
+    """
+
+    def do_GET(self):
+        """Xử lý GET request - trả về trạng thái bot."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+
+        now = datetime.now(VN_TIMEZONE)
+        tracking = len(alert_state)
+
+        html = (
+            "<html><head><title>Gold Price Bot</title></head>"
+            "<body style='font-family:monospace; padding:20px; background:#1a1a2e; color:#eee;'>"
+            "<h1>🥇 Bot Theo Dõi Giá Vàng</h1>"
+            f"<p>⏰ Thời gian: {now.strftime('%H:%M:%S %d/%m/%Y')}</p>"
+            f"<p>📊 Ngưỡng cảnh báo: {format_price(PRICE_THRESHOLD)}</p>"
+            f"<p>🔄 Kiểm tra mỗi: {CHECK_INTERVAL_SECONDS // 60} phút</p>"
+            f"<p>👁 Đang theo dõi: {tracking} loại vàng</p>"
+            f"<p>📌 Nguồn: 24h.com.vn</p>"
+            "<p>✅ Bot đang hoạt động!</p>"
+            "</body></html>"
+        )
+        self.wfile.write(html.encode("utf-8"))
+
+    def log_message(self, format, *args):
+        """Tắt log mặc định của HTTPServer để tránh spam console."""
+        pass
+
+
+def start_keep_alive_server():
+    """
+    Khởi động HTTP server trên PORT để Render.com nhận diện service.
+    Chạy trong background thread, không block main thread.
+    """
+    server = HTTPServer(("", PORT), KeepAliveHandler)
+    logger.info(f"🌐 Keep-alive server đang chạy trên port {PORT}")
+    server.serve_forever()
+
+
+def self_ping():
+    """
+    Tự ping chính mình mỗi 5 phút để Render.com không tắt service.
+
+    Render free tier tắt service sau 15 phút không có request.
+    Bằng cách gửi request đến chính mình, service luôn có traffic
+    và sẽ không bị tắt.
+
+    Cách hoạt động:
+    - Đọc RENDER_EXTERNAL_URL (tự cấu hình) hoặc RENDER_EXTERNAL_HOSTNAME (Render cung cấp)
+    - Gửi GET request mỗi 5 phút
+    - Nếu không có URL, bỏ qua (chạy local không cần self-ping)
+    """
+    # Xác định URL để ping
+    ping_url = RENDER_EXTERNAL_URL
+    if not ping_url:
+        hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+        if hostname:
+            ping_url = f"https://{hostname}"
+
+    if not ping_url:
+        logger.info("[KEEP-ALIVE] Không tìm thấy URL Render → bỏ qua self-ping (đang chạy local)")
+        return
+
+    logger.info(f"[KEEP-ALIVE] Bắt đầu self-ping tới: {ping_url}")
+
+    while True:
+        time.sleep(300)  # 5 phút
+        try:
+            resp = requests.get(ping_url, timeout=10)
+            logger.debug(f"[KEEP-ALIVE] Ping OK → status {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"[KEEP-ALIVE] Ping thất bại: {e}")
+
+
 def main() -> None:
     """
     Hàm main - Điểm vào chương trình.
 
     Quy trình:
     1. Kiểm tra cấu hình BOT_TOKEN và CHAT_ID
-    2. Khởi tạo Application với python-telegram-bot 20.x
-    3. Đăng ký các command handlers
-    4. Thiết lập post_init callback để cấu hình JobQueue
-    5. Bắt đầu polling
+    2. Khởi động keep-alive web server (cho Render.com)
+    3. Khởi động self-ping thread
+    4. Khởi tạo Application với python-telegram-bot 20.x
+    5. Đăng ký các command handlers
+    6. Thiết lập post_init callback để cấu hình JobQueue
+    7. Bắt đầu polling
     """
 
     # ── Kiểm tra cấu hình ──
@@ -911,6 +1018,16 @@ def main() -> None:
         print("=" * 60)
         print("Bot vẫn chạy nhưng sẽ không gửi được cảnh báo tự động.")
         print()
+
+    # ── Khởi động Keep-Alive Server (background thread) ──
+    # Thread daemon=True → tự tắt khi main thread kết thúc
+    server_thread = threading.Thread(target=start_keep_alive_server, daemon=True)
+    server_thread.start()
+    logger.info(f"✅ Keep-alive server đã khởi động trên port {PORT}")
+
+    # ── Khởi động Self-Ping (background thread) ──
+    ping_thread = threading.Thread(target=self_ping, daemon=True)
+    ping_thread.start()
 
     # ── Khởi tạo Application ──
     application = (
@@ -934,6 +1051,7 @@ def main() -> None:
     logger.info(f"📊 Ngưỡng cảnh báo: {format_price(PRICE_THRESHOLD)}")
     logger.info(f"🔄 Tần suất kiểm tra: {CHECK_INTERVAL_SECONDS // 60} phút")
     logger.info(f"⏱ Thời gian theo dõi giảm: {DROP_MONITOR_WINDOW_SECONDS // 60} phút")
+    logger.info(f"🌐 Web server: port {PORT}")
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
