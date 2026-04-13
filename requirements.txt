@@ -1,0 +1,18 @@
+# =============================================================================
+# Bot Telegram Theo Dõi Giá Vàng Việt Nam - Dependencies
+# =============================================================================
+# Cài đặt: pip install -r requirements.txt
+# =============================================================================
+
+# Thư viện chính cho Telegram Bot (phiên bản 20.x, async/await)
+# [job-queue] bao gồm APScheduler tích hợp sẵn
+python-telegram-bot[job-queue]>=20.0
+
+# HTTP requests - gọi API và cào dữ liệu
+requests>=2.28.0
+
+# HTML/XML parser - phân tích cú pháp trang web
+beautifulsoup4>=4.11.0
+
+# XML parser nhanh hơn html.parser mặc định
+lxml>=4.9.0
