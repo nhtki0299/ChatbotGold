@@ -76,7 +76,7 @@ BOT_TOKEN = "8637938416:AAHS3zRoTG5ZeQdycW9EAJWFI8XsWWuYPZo"
 CHAT_ID = "6239098089"
 
 # Ngưỡng giá cảnh báo (VNĐ/lượng)
-PRICE_THRESHOLD = 170_000_000  # 170 triệu VNĐ
+PRICE_THRESHOLD = 175_000_000  # 175 triệu VNĐ
 
 # Tần suất kiểm tra giá (giây) - mặc định 15 phút = 900 giây
 CHECK_INTERVAL_SECONDS = 15 * 60  # 900 giây
